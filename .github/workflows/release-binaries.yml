@@ -33,9 +33,10 @@ permissions:
 env:
   BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
   MR_BASE: "https://ffmpeg.martin-riedl.de/redirect/latest"
-  IM_LINUX_URL: "https://imagemagick.org/archive/binaries/magick"
-  # Pin a concrete portable build for Windows (the archive name is version-specific).
-  IM_WINDOWS_URL: "https://imagemagick.org/archive/binaries/ImageMagick-7.1.1-43-portable-Q16-x64.zip"
+  # Linux: official single-file AppImage, published on GitHub releases.
+  IM_LINUX_URL: "https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-26/ImageMagick-7.1.2-26-gcc-x86_64.AppImage"
+  # Windows: official portable build — a .7z (not .zip), version-specific name.
+  IM_WINDOWS_URL: "https://download.imagemagick.org/archive/binaries/ImageMagick-7.1.2-25-portable-Q16-x64.7z"
 
 jobs:
   build:
@@ -93,8 +94,8 @@ jobs:
               chmod +x stage/bin/magick
               ;;
             windows-x86_64)
-              curl -fsSL "$IM_WINDOWS_URL" -o im.zip
-              7z x im.zip -oim >/dev/null
+              curl -fsSL "$IM_WINDOWS_URL" -o im.7z
+              7z x im.7z -oim >/dev/null
               cp "$(find im -iname 'magick.exe' | head -1)" stage/bin/magick.exe
               ;;
             macos-x86_64|macos-aarch64)
@@ -102,7 +103,9 @@ jobs:
               # bundle its dylibs into stage/lib with paths rewritten to
               # @executable_path/../lib so the bundle is relocatable on a user's Mac.
               # Alternative: consume mendelson.org's notarized universal build instead.
-              brew update
+              # Skip `brew update` (the Intel runner can hang on it for >1h); installs
+              # use the runner's existing bottles, which is what made arm64 finish fast.
+              export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
               brew install imagemagick dylibbundler
               cp "$(brew --prefix imagemagick)/bin/magick" stage/bin/magick
               mkdir -p stage/lib
