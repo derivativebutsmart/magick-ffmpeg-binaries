@@ -1,0 +1,163 @@
+# Build & publish the per-platform FFmpeg + ImageMagick bundles consumed by
+# {{ffmpeg/imagemagick project}}'s first-boot downloader (Ticket 1.4).
+#
+# Output: for each platform an archive `binaries-<slug>.<ext>` containing
+# `bin/{ffmpeg,ffprobe,magick}` (+ `lib/` on macOS), uploaded to the `binaries-v1`
+# release, plus a `SHA256SUMS` file. Copy the four digests from SHA256SUMS into
+# `binaries_sha256()` in the app's `src-tauri/src/downloader/assets.rs`.
+#
+# NOTE: this is a first cut. It cannot be verified outside CI — expect a run or two
+# of shakeout, with macOS (especially `magick`) the most likely first failure.
+#
+# REPRODUCIBILITY: the FFmpeg sources below track "latest"/"snapshot", so each run
+# yields different bytes and therefore different digests (which the app pins). For a
+# stable release, pin BtbN/Martin-Riedl to specific versioned URLs before relying on
+# this in production.
+#
+# LICENSING: BtbN builds are GPL; shipping them publicly means honoring FFmpeg's
+# GPL terms (include the license text — done below — and be ready to provide source).
+
+name: Build & publish media binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish/update"
+        default: "binaries-v1"
+        required: true
+
+permissions:
+  contents: write # create/update releases
+
+env:
+  BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+  MR_BASE: "https://ffmpeg.martin-riedl.de/redirect/latest"
+  IM_LINUX_URL: "https://imagemagick.org/archive/binaries/magick"
+  # Pin a concrete portable build for Windows (the archive name is version-specific).
+  IM_WINDOWS_URL: "https://imagemagick.org/archive/binaries/ImageMagick-7.1.1-43-portable-Q16-x64.zip"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { slug: linux-x86_64, os: ubuntu-22.04, ext: tar.gz }
+          - { slug: windows-x86_64, os: windows-latest, ext: zip }
+          - { slug: macos-x86_64, os: macos-13, ext: tar.gz }
+          - { slug: macos-aarch64, os: macos-14, ext: tar.gz }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Assemble FFmpeg + ffprobe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p stage/bin
+          case "${{ matrix.slug }}" in
+            linux-x86_64)
+              curl -fsSL "$BTBN_BASE/ffmpeg-master-latest-linux64-gpl.tar.xz" -o ff.tar.xz
+              tar xf ff.tar.xz
+              cp ffmpeg-*-linux64-gpl/bin/ffmpeg  stage/bin/ffmpeg
+              cp ffmpeg-*-linux64-gpl/bin/ffprobe stage/bin/ffprobe
+              ;;
+            windows-x86_64)
+              curl -fsSL "$BTBN_BASE/ffmpeg-master-latest-win64-gpl.zip" -o ff.zip
+              7z x ff.zip >/dev/null
+              cp ffmpeg-*-win64-gpl/bin/ffmpeg.exe  stage/bin/ffmpeg.exe
+              cp ffmpeg-*-win64-gpl/bin/ffprobe.exe stage/bin/ffprobe.exe
+              ;;
+            macos-x86_64)
+              for b in ffmpeg ffprobe; do
+                curl -fsSL "$MR_BASE/macos/amd64/snapshot/$b.zip" -o "$b.zip"
+                unzip -o "$b.zip" -d stage/bin
+              done
+              ;;
+            macos-aarch64)
+              for b in ffmpeg ffprobe; do
+                curl -fsSL "$MR_BASE/macos/arm64/snapshot/$b.zip" -o "$b.zip"
+                unzip -o "$b.zip" -d stage/bin
+              done
+              ;;
+          esac
+
+      - name: Assemble ImageMagick (magick)
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.slug }}" in
+            linux-x86_64)
+              # Official AppImage = a single self-contained `magick`.
+              # (Runs without FUSE via APPIMAGE_EXTRACT_AND_RUN on hosts lacking it.)
+              curl -fsSL "$IM_LINUX_URL" -o stage/bin/magick
+              chmod +x stage/bin/magick
+              ;;
+            windows-x86_64)
+              curl -fsSL "$IM_WINDOWS_URL" -o im.zip
+              7z x im.zip -oim >/dev/null
+              cp "$(find im -iname 'magick.exe' | head -1)" stage/bin/magick.exe
+              ;;
+            macos-x86_64|macos-aarch64)
+              # GAP: no clean prebuilt-static macOS `magick`. Build via Homebrew, then
+              # bundle its dylibs into stage/lib with paths rewritten to
+              # @executable_path/../lib so the bundle is relocatable on a user's Mac.
+              # Alternative: consume mendelson.org's notarized universal build instead.
+              brew update
+              brew install imagemagick dylibbundler
+              cp "$(brew --prefix imagemagick)/bin/magick" stage/bin/magick
+              mkdir -p stage/lib
+              dylibbundler -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+              ;;
+          esac
+
+      - name: Add license texts (FFmpeg is GPL)
+        shell: bash
+        run: |
+          mkdir -p stage/licenses
+          curl -fsSL "https://www.gnu.org/licenses/gpl-3.0.txt" -o stage/licenses/FFmpeg-GPL-3.0.txt || true
+          curl -fsSL "https://imagemagick.org/script/license.php" -o stage/licenses/ImageMagick-license.html || true
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x stage/bin/* 2>/dev/null || true
+          out="binaries-${{ matrix.slug }}.${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = "zip" ]; then
+            ( cd stage && 7z a -tzip "../$out" . >/dev/null )
+          else
+            tar czf "$out" -C stage .
+          fi
+          ls -l "$out"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.slug }}
+          path: binaries-${{ matrix.slug }}.${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Gather all bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum binaries-* | tee SHA256SUMS
+
+      - name: Publish/update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: Media binaries (${{ inputs.tag }})
+          files: |
+            dist/binaries-*
+            dist/SHA256SUMS
