@@ -46,7 +46,9 @@ jobs:
         include:
           - { slug: linux-x86_64, os: ubuntu-22.04, ext: tar.gz }
           - { slug: windows-x86_64, os: windows-latest, ext: zip }
-          - { slug: macos-x86_64, os: macos-13, ext: tar.gz }
+          # x86_64 is built on the arm64 runner under Rosetta (Intel macOS runners
+          # are scarce/being retired); see the magick step for how.
+          - { slug: macos-x86_64, os: macos-14, ext: tar.gz }
           - { slug: macos-aarch64, os: macos-14, ext: tar.gz }
     runs-on: ${{ matrix.os }}
     steps:
@@ -98,18 +100,38 @@ jobs:
               7z x im.7z -oim >/dev/null
               cp "$(find im -iname 'magick.exe' | head -1)" stage/bin/magick.exe
               ;;
-            macos-x86_64|macos-aarch64)
+            macos-aarch64)
               # GAP: no clean prebuilt-static macOS `magick`. Build via Homebrew, then
               # bundle its dylibs into stage/lib with paths rewritten to
               # @executable_path/../lib so the bundle is relocatable on a user's Mac.
               # Alternative: consume mendelson.org's notarized universal build instead.
-              # Skip `brew update` (the Intel runner can hang on it for >1h); installs
-              # use the runner's existing bottles, which is what made arm64 finish fast.
+              # Skip `brew update` (it can hang for >1h); installs use existing bottles.
               export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
               brew install imagemagick dylibbundler
               cp "$(brew --prefix imagemagick)/bin/magick" stage/bin/magick
               mkdir -p stage/lib
               dylibbundler -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+              ;;
+            macos-x86_64)
+              # Built on the arm64 runner: install a SECOND, Intel Homebrew prefix at
+              # /usr/local under Rosetta (the native arm64 brew at /opt/homebrew is left
+              # alone), so `magick` and its bundled dylibs are genuinely x86_64. This
+              # avoids depending on the scarce/retiring Intel macOS runner pool.
+              export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+              softwareupdate --install-rosetta --agree-to-license || true
+              if [ ! -x /usr/local/bin/brew ]; then
+                arch -x86_64 /bin/bash -c \
+                  "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+              fi
+              IBREW="arch -x86_64 /usr/local/bin/brew"
+              $IBREW install imagemagick dylibbundler
+              cp "$($IBREW --prefix imagemagick)/bin/magick" stage/bin/magick
+              mkdir -p stage/lib
+              arch -x86_64 /usr/local/bin/dylibbundler \
+                -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+              # Fail loudly if Rosetta somehow produced an arm64 binary.
+              file stage/bin/magick | grep -q 'x86_64' \
+                || { echo "ERROR: bundled magick is not x86_64"; file stage/bin/magick; exit 1; }
               ;;
           esac
 
