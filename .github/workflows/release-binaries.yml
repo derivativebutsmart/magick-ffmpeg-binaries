@@ -31,12 +31,25 @@ permissions:
   contents: write # create/update releases
 
 env:
-  BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
-  MR_BASE: "https://ffmpeg.martin-riedl.de/redirect/latest"
+  # FFmpeg/ffprobe pinned to specific upstream builds for reproducibility (the
+  # previous `latest`/`snapshot` pointers drifted on every run). Bump these to
+  # re-pin; the published binaries-v1 release is the durable artifact users fetch,
+  # so an upstream prune of an old build only breaks a *re-build*, not downloads.
+  BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-29-14-25"
+  BTBN_LINUX: "ffmpeg-N-125350-g3f6bf150cb-linux64-gpl.tar.xz"
+  BTBN_WIN: "ffmpeg-N-125350-g3f6bf150cb-win64-gpl.zip"
+  # Martin-Riedl pins are per-arch (each arch has its own build id).
+  MR_MACOS_ARM64: "https://ffmpeg.martin-riedl.de/download/macos/arm64/1781693612_N-125070-gd69e8d0a95"
+  MR_MACOS_AMD64: "https://ffmpeg.martin-riedl.de/download/macos/amd64/1767299902_N-122320-g38e89fe502"
   # Linux: official single-file AppImage, published on GitHub releases.
   IM_LINUX_URL: "https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-26/ImageMagick-7.1.2-26-gcc-x86_64.AppImage"
   # Windows: official portable build — a .7z (not .zip), version-specific name.
   IM_WINDOWS_URL: "https://download.imagemagick.org/archive/binaries/ImageMagick-7.1.2-25-portable-Q16-x64.7z"
+  # macOS magick comes from Homebrew (no clean version pin exists). It's whatever
+  # homebrew-core has when you deliberately rebuild — which is fine: the app pins the
+  # published bundle's SHA-256, so users always get the exact binaries that release
+  # shipped, regardless of later upstream bumps. Pick the version by choosing when to
+  # rebuild + re-pin; don't republish binaries-v1 under an already-shipped app.
 
 jobs:
   build:
@@ -59,26 +72,26 @@ jobs:
           mkdir -p stage/bin
           case "${{ matrix.slug }}" in
             linux-x86_64)
-              curl -fsSL "$BTBN_BASE/ffmpeg-master-latest-linux64-gpl.tar.xz" -o ff.tar.xz
+              curl -fsSL "$BTBN_BASE/$BTBN_LINUX" -o ff.tar.xz
               tar xf ff.tar.xz
               cp ffmpeg-*-linux64-gpl/bin/ffmpeg  stage/bin/ffmpeg
               cp ffmpeg-*-linux64-gpl/bin/ffprobe stage/bin/ffprobe
               ;;
             windows-x86_64)
-              curl -fsSL "$BTBN_BASE/ffmpeg-master-latest-win64-gpl.zip" -o ff.zip
+              curl -fsSL "$BTBN_BASE/$BTBN_WIN" -o ff.zip
               7z x ff.zip >/dev/null
               cp ffmpeg-*-win64-gpl/bin/ffmpeg.exe  stage/bin/ffmpeg.exe
               cp ffmpeg-*-win64-gpl/bin/ffprobe.exe stage/bin/ffprobe.exe
               ;;
             macos-x86_64)
               for b in ffmpeg ffprobe; do
-                curl -fsSL "$MR_BASE/macos/amd64/snapshot/$b.zip" -o "$b.zip"
+                curl -fsSL "$MR_MACOS_AMD64/$b.zip" -o "$b.zip"
                 unzip -o "$b.zip" -d stage/bin
               done
               ;;
             macos-aarch64)
               for b in ffmpeg ffprobe; do
-                curl -fsSL "$MR_BASE/macos/arm64/snapshot/$b.zip" -o "$b.zip"
+                curl -fsSL "$MR_MACOS_ARM64/$b.zip" -o "$b.zip"
                 unzip -o "$b.zip" -d stage/bin
               done
               ;;
@@ -148,10 +161,22 @@ jobs:
           set -euo pipefail
           chmod +x stage/bin/* 2>/dev/null || true
           out="binaries-${{ matrix.slug }}.${{ matrix.ext }}"
+          # Reproducible archives: identical inputs must yield identical bytes (stable
+          # SHA-256). Normalize every entry's mtime, archive in name order, and strip
+          # compressor timestamps. (Runner-image tool versions can still drift bytes —
+          # the published bundle is the source of truth either way.)
+          export TZ=UTC
+          find stage -exec touch -t 202601010000.00 {} +
           if [ "${{ matrix.ext }}" = "zip" ]; then
-            ( cd stage && 7z a -tzip "../$out" . >/dev/null )
+            # 7z stores per-file mtimes (now fixed) and orders entries by name.
+            ( cd stage && 7z a -tzip -mx=9 "../$out" . >/dev/null )
           else
-            tar czf "$out" -C stage .
+            # GNU tar (gtar on macOS) for --sort/--mtime/--numeric-owner; gzip -n drops
+            # the gzip header's name+timestamp.
+            TAR=tar
+            [ "$(uname)" = Darwin ] && { HOMEBREW_NO_AUTO_UPDATE=1 brew install gnu-tar >/dev/null; TAR=gtar; }
+            "$TAR" --sort=name --numeric-owner --owner=0 --group=0 \
+                   --mtime='2026-01-01 00:00:00 UTC' -C stage -cf - . | gzip -n > "$out"
           fi
           ls -l "$out"
 
