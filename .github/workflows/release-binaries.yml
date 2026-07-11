@@ -135,7 +135,10 @@ jobs:
             local RUN="$1" BREW="$2" BUNDLER="$3"
             export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
             # Delegate libraries the built-in coders link against, plus build tools.
-            local DEPS="pkg-config libpng jpeg-turbo libtiff webp libheif little-cms2 freetype"
+            # fontconfig is listed explicitly (not just pulled in via freetype) because
+            # ImageMagick links it directly for font discovery, so it must resolve to
+            # THIS arch's copy — see the pkg-config pinning below.
+            local DEPS="pkg-config libpng jpeg-turbo libtiff webp libheif little-cms2 freetype fontconfig"
             # shellcheck disable=SC2086
             $RUN $BREW install $DEPS dylibbundler
 
@@ -143,14 +146,24 @@ jobs:
             mkdir -p im-src && tar xf im-src.tar.gz -C im-src --strip-components=1
 
             local INSTALL="$GITHUB_WORKSPACE/im-install"
-            # keg-only delegates (e.g. jpeg-turbo) don't symlink their .pc into the
-            # main prefix, so add each delegate's own pkgconfig dir explicitly.
-            local PC=""
+            local PREFIX; PREFIX="$($RUN $BREW --prefix)"
+            # Pin pkg-config EXCLUSIVELY to this arch's brew prefix. Use
+            # PKG_CONFIG_LIBDIR (which REPLACES the default search path), not
+            # PKG_CONFIG_PATH (which only augments it): on the Rosetta x86_64 build the
+            # augment form let the native arm64 /opt/homebrew prefix leak in, so
+            # configure linked the arm64 libfontconfig and ld failed with "found
+            # architecture 'arm64', required architecture 'x86_64'". Include the main
+            # prefix (where non-keg-only .pc like fontconfig/freetype are symlinked)
+            # plus each keg-only delegate's own pkgconfig dir (e.g. jpeg-turbo).
+            local PC="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
             for f in $DEPS; do
               [ "$f" = "pkg-config" ] && continue
               PC="$PC:$($RUN $BREW --prefix "$f")/lib/pkgconfig"
             done
-            export PKG_CONFIG_PATH="${PC#:}:$($RUN $BREW --prefix)/lib/pkgconfig"
+            export PKG_CONFIG_LIBDIR="$PC"
+            # Keep the C/linker default search on this arch's prefix too, so any
+            # non-pkg-config header/lib probe can't fall back to the other arch.
+            export CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib"
 
             pushd im-src >/dev/null
             # shellcheck disable=SC2086
