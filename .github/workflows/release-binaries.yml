@@ -41,15 +41,14 @@ env:
   # Martin-Riedl pins are per-arch (each arch has its own build id).
   MR_MACOS_ARM64: "https://ffmpeg.martin-riedl.de/download/macos/arm64/1781693612_N-125070-gd69e8d0a95"
   MR_MACOS_AMD64: "https://ffmpeg.martin-riedl.de/download/macos/amd64/1767299902_N-122320-g38e89fe502"
-  # Linux: official single-file AppImage, published on GitHub releases.
-  IM_LINUX_URL: "https://github.com/ImageMagick/ImageMagick/releases/download/7.1.2-26/ImageMagick-7.1.2-26-gcc-x86_64.AppImage"
-  # Windows: official portable build — a .7z (not .zip), version-specific name.
-  IM_WINDOWS_URL: "https://download.imagemagick.org/archive/binaries/ImageMagick-7.1.2-25-portable-Q16-x64.7z"
-  # macOS magick comes from Homebrew (no clean version pin exists). It's whatever
-  # homebrew-core has when you deliberately rebuild — which is fine: the app pins the
-  # published bundle's SHA-256, so users always get the exact binaries that release
-  # shipped, regardless of later upstream bumps. Pick the version by choosing when to
-  # rebuild + re-pin; don't republish binaries-v1 under an already-shipped app.
+  # ImageMagick: pin ONE version and pull every artifact from GitHub Releases, which
+  # keeps all assets permanently. imagemagick.org prunes version-specific downloads
+  # (that pruning is exactly what 404'd the old Windows pin and the macOS source
+  # tarball), so it must not be used for reproducible pinned builds. The magick step
+  # builds these URLs from IM_VER: Linux = gcc AppImage, Windows = portable-Q16 .7z,
+  # macOS = the source tag tarball (which ships a prebuilt ./configure) built
+  # --without-modules. Bump IM_VER to re-pin; the app pins the published bundle SHA.
+  IM_VER: "7.1.2-27"
 
 jobs:
   build:
@@ -116,17 +115,17 @@ jobs:
           # still dylibbundler the *delegate* dylibs (libpng, jpeg-turbo, …) into
           # stage/lib with @executable_path/../lib install names for relocatability.
           #
-          # Pinned to the same ImageMagick line as the Linux AppImage above. NOTE:
-          # source build + delegate detection can only be verified in CI — expect a
-          # shakeout run; the smoke test below fails loud if a coder is missing.
-          IM_VER="7.1.2-26"
-          # imagemagick.org ships an autotools-bootstrapped source tarball (includes
-          # `configure`, so no autogen bootstrap is needed). Current releases sit under
-          # /archive/; older ones move to /archive/releases/ — fetch tries both.
-          fetch_im_src() {
-            curl -fsSL "https://imagemagick.org/archive/ImageMagick-${IM_VER}.tar.gz" -o im-src.tar.gz \
-              || curl -fsSL "https://imagemagick.org/archive/releases/ImageMagick-${IM_VER}.tar.gz" -o im-src.tar.gz
-          }
+          # NOTE: the source build + delegate detection can only be verified in CI —
+          # expect a shakeout run; the smoke test below fails loud if a coder is missing.
+          #
+          # All three ImageMagick artifacts come from GitHub Releases (permanent),
+          # pinned to $IM_VER (set in the workflow `env:`): Linux gcc AppImage, Windows
+          # portable-Q16 .7z, and the source tag tarball for the macOS build. The tag
+          # tarball ships a prebuilt ./configure, so no autotools bootstrap is needed.
+          IM_GH="https://github.com/ImageMagick/ImageMagick"
+          IM_LINUX_URL="$IM_GH/releases/download/$IM_VER/ImageMagick-$IM_VER-gcc-x86_64.AppImage"
+          IM_WINDOWS_URL="$IM_GH/releases/download/$IM_VER/ImageMagick-$IM_VER-portable-Q16-x64.7z"
+          IM_SRC_URL="$IM_GH/archive/refs/tags/$IM_VER.tar.gz"
 
           # Build a self-contained `magick` from source.
           #   $1 RUN     — arch prefix: "" (native arm64) or "arch -x86_64" (Rosetta)
@@ -140,7 +139,7 @@ jobs:
             # shellcheck disable=SC2086
             $RUN $BREW install $DEPS dylibbundler
 
-            fetch_im_src
+            curl -fsSL "$IM_SRC_URL" -o im-src.tar.gz
             mkdir -p im-src && tar xf im-src.tar.gz -C im-src --strip-components=1
 
             local INSTALL="$GITHUB_WORKSPACE/im-install"
