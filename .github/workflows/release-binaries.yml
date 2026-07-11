@@ -147,23 +147,27 @@ jobs:
 
             local INSTALL="$GITHUB_WORKSPACE/im-install"
             local PREFIX; PREFIX="$($RUN $BREW --prefix)"
-            # Pin pkg-config EXCLUSIVELY to this arch's brew prefix. Use
-            # PKG_CONFIG_LIBDIR (which REPLACES the default search path), not
-            # PKG_CONFIG_PATH (which only augments it): on the Rosetta x86_64 build the
-            # augment form let the native arm64 /opt/homebrew prefix leak in, so
-            # configure linked the arm64 libfontconfig and ld failed with "found
-            # architecture 'arm64', required architecture 'x86_64'". Include the main
-            # prefix (where non-keg-only .pc like fontconfig/freetype are symlinked)
-            # plus each keg-only delegate's own pkgconfig dir (e.g. jpeg-turbo).
-            local PC="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
+            # Use THIS arch's pkg-config binary — its compiled-in default search path
+            # points at this prefix. That resolves BOTH problems seen in earlier runs:
+            #  (a) the Rosetta x86_64 arch leak — the native arm64 pkg-config's default
+            #      path was serving an arm64 libfontconfig into the x86_64 link
+            #      (ld: "found architecture 'arm64', required architecture 'x86_64'");
+            #  (b) transitive keg-only deps — libpng16.pc has `Requires.private: zlib`
+            #      and zlib is keg-only, so it lives on the default path, not in any dir
+            #      we could easily enumerate. We must therefore AUGMENT the default path
+            #      (PKG_CONFIG_PATH), never REPLACE it (PKG_CONFIG_LIBDIR): replacing it
+            #      drops zlib, libpng is rejected, and ImageMagick silently disables PNG
+            #      (→ "no encode delegate" at runtime). Augment + arch-matched binary
+            #      keeps every delegate resolvable AND on the correct architecture.
+            export PKG_CONFIG="$PREFIX/bin/pkg-config"
+            # Add each keg-only delegate's own pkgconfig dir (e.g. jpeg-turbo) on top of
+            # the arch-correct default path.
+            local PC=""
             for f in $DEPS; do
               [ "$f" = "pkg-config" ] && continue
               PC="$PC:$($RUN $BREW --prefix "$f")/lib/pkgconfig"
             done
-            export PKG_CONFIG_LIBDIR="$PC"
-            # Keep the C/linker default search on this arch's prefix too, so any
-            # non-pkg-config header/lib probe can't fall back to the other arch.
-            export CPPFLAGS="-I$PREFIX/include" LDFLAGS="-L$PREFIX/lib"
+            export PKG_CONFIG_PATH="${PC#:}:$PREFIX/lib/pkgconfig"
 
             pushd im-src >/dev/null
             # shellcheck disable=SC2086
@@ -196,6 +200,14 @@ jobs:
             if stage/bin/magick -version | grep -q 'Modules'; then
               echo "ERROR: magick is still a modules build; runtime coders would be missing"
               stage/bin/magick -version; exit 1
+            fi
+            # Clear canary: PNG must be registered read+write. If a delegate probe
+            # silently failed at configure time this fails HERE with an obvious message,
+            # rather than as a cryptic "no encode delegate for `XC'" from the round-trip.
+            if ! stage/bin/magick -list format | grep -Eiq 'PNG\*?[[:space:]]+PNG[[:space:]]+rw'; then
+              echo "ERROR: PNG is not registered read/write in this build (delegate probe likely failed at configure)"
+              stage/bin/magick -list format | grep -i png || true
+              exit 1
             fi
             local m="$GITHUB_WORKSPACE/stage/bin/magick" t
             t="$(mktemp -d)"
