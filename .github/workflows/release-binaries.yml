@@ -101,50 +101,130 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # macOS `magick` is built FROM SOURCE with `--without-modules` (see the
+          # helper below). The previous approach — copy Homebrew's `magick` and run
+          # dylibbundler — shipped a *modules* build: ImageMagick's coders (png, jpeg,
+          # …) are separate runtime modules under share/ImageMagick that are dlopen'd,
+          # and dylibbundler follows only *linked* dylibs, not dlopen'd modules. So the
+          # bundle carried the binary + core dylibs but none of the coders or config.
+          # On a user's Mac that surfaced (Ticket 3.3.1 shakeout) as:
+          #   magick: NoDecodeDelegateForThisImageFormat `…/foo.png' @ ReadImage
+          #   magick: UnableToOpenConfigureFile `delegates.xml' @ GetConfigureOptions
+          # `--without-modules` compiles every coder INTO libMagickCore, so the single
+          # binary decodes PNG/JPEG/… with no runtime module or config directory. We
+          # still dylibbundler the *delegate* dylibs (libpng, jpeg-turbo, …) into
+          # stage/lib with @executable_path/../lib install names for relocatability.
+          #
+          # Pinned to the same ImageMagick line as the Linux AppImage above. NOTE:
+          # source build + delegate detection can only be verified in CI — expect a
+          # shakeout run; the smoke test below fails loud if a coder is missing.
+          IM_VER="7.1.2-26"
+          # imagemagick.org ships an autotools-bootstrapped source tarball (includes
+          # `configure`, so no autogen bootstrap is needed). Current releases sit under
+          # /archive/; older ones move to /archive/releases/ — fetch tries both.
+          fetch_im_src() {
+            curl -fsSL "https://imagemagick.org/archive/ImageMagick-${IM_VER}.tar.gz" -o im-src.tar.gz \
+              || curl -fsSL "https://imagemagick.org/archive/releases/ImageMagick-${IM_VER}.tar.gz" -o im-src.tar.gz
+          }
+
+          # Build a self-contained `magick` from source.
+          #   $1 RUN     — arch prefix: "" (native arm64) or "arch -x86_64" (Rosetta)
+          #   $2 BREW    — brew binary: "brew" (arm64) or "/usr/local/bin/brew" (Intel)
+          #   $3 BUNDLER — dylibbundler path matching the target arch
+          build_magick_from_source() {
+            local RUN="$1" BREW="$2" BUNDLER="$3"
+            export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+            # Delegate libraries the built-in coders link against, plus build tools.
+            local DEPS="pkg-config libpng jpeg-turbo libtiff webp libheif little-cms2 freetype"
+            # shellcheck disable=SC2086
+            $RUN $BREW install $DEPS dylibbundler
+
+            fetch_im_src
+            mkdir -p im-src && tar xf im-src.tar.gz -C im-src --strip-components=1
+
+            local INSTALL="$GITHUB_WORKSPACE/im-install"
+            # keg-only delegates (e.g. jpeg-turbo) don't symlink their .pc into the
+            # main prefix, so add each delegate's own pkgconfig dir explicitly.
+            local PC=""
+            for f in $DEPS; do
+              [ "$f" = "pkg-config" ] && continue
+              PC="$PC:$($RUN $BREW --prefix "$f")/lib/pkgconfig"
+            done
+            export PKG_CONFIG_PATH="${PC#:}:$($RUN $BREW --prefix)/lib/pkgconfig"
+
+            pushd im-src >/dev/null
+            # shellcheck disable=SC2086
+            $RUN ./configure \
+              --prefix="$INSTALL" \
+              --without-modules \
+              --disable-docs \
+              --disable-dependency-tracking \
+              --disable-openmp \
+              --without-x \
+              --without-magick-plus-plus \
+              --with-png --with-jpeg --with-tiff --with-webp --with-heic \
+              --with-freetype --with-lcms2
+            # shellcheck disable=SC2086
+            $RUN make -j"$(sysctl -n hw.ncpu)"
+            # shellcheck disable=SC2086
+            $RUN make install
+            popd >/dev/null
+
+            mkdir -p stage/bin stage/lib
+            cp "$INSTALL/bin/magick" stage/bin/magick
+            # shellcheck disable=SC2086
+            $RUN "$BUNDLER" -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+          }
+
+          # Prove the result is genuinely self-contained: NOT a modules build, and it
+          # round-trips a PNG (the exact operation that failed) with ImageMagick env
+          # unset and from a scratch dir — mirroring a clean user machine.
+          verify_magick() {
+            if stage/bin/magick -version | grep -q 'Modules'; then
+              echo "ERROR: magick is still a modules build; runtime coders would be missing"
+              stage/bin/magick -version; exit 1
+            fi
+            local m="$GITHUB_WORKSPACE/stage/bin/magick" t
+            t="$(mktemp -d)"
+            ( cd "$t" \
+              && env -u MAGICK_HOME -u MAGICK_CONFIGURE_PATH "$m" -size 8x8 xc:red png:in.png \
+              && env -u MAGICK_HOME -u MAGICK_CONFIGURE_PATH "$m" in.png -resize 4x4 png:out.png )
+            echo "magick self-contained PNG round-trip OK"
+          }
+
           case "${{ matrix.slug }}" in
             linux-x86_64)
-              # Official AppImage = a single self-contained `magick`.
+              # Official AppImage = a single self-contained `magick` (coders built in).
               # (Runs without FUSE via APPIMAGE_EXTRACT_AND_RUN on hosts lacking it.)
               curl -fsSL "$IM_LINUX_URL" -o stage/bin/magick
               chmod +x stage/bin/magick
               ;;
             windows-x86_64)
+              # Official portable build = self-contained magick.exe.
               curl -fsSL "$IM_WINDOWS_URL" -o im.7z
               7z x im.7z -oim >/dev/null
               cp "$(find im -iname 'magick.exe' | head -1)" stage/bin/magick.exe
               ;;
             macos-aarch64)
-              # GAP: no clean prebuilt-static macOS `magick`. Build via Homebrew, then
-              # bundle its dylibs into stage/lib with paths rewritten to
-              # @executable_path/../lib so the bundle is relocatable on a user's Mac.
-              # Alternative: consume mendelson.org's notarized universal build instead.
-              # Skip `brew update` (it can hang for >1h); installs use existing bottles.
-              export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-              brew install imagemagick dylibbundler
-              cp "$(brew --prefix imagemagick)/bin/magick" stage/bin/magick
-              mkdir -p stage/lib
-              dylibbundler -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+              build_magick_from_source "" "brew" "dylibbundler"
+              verify_magick
               ;;
             macos-x86_64)
-              # Built on the arm64 runner: install a SECOND, Intel Homebrew prefix at
-              # /usr/local under Rosetta (the native arm64 brew at /opt/homebrew is left
-              # alone), so `magick` and its bundled dylibs are genuinely x86_64. This
-              # avoids depending on the scarce/retiring Intel macOS runner pool.
-              export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+              # Built on the arm64 runner under Rosetta against a SECOND, Intel
+              # Homebrew prefix at /usr/local (the native arm64 brew at /opt/homebrew
+              # is left alone), so magick + its bundled dylibs are genuinely x86_64.
+              # Avoids the scarce/retiring Intel macOS runner pool.
               softwareupdate --install-rosetta --agree-to-license || true
               if [ ! -x /usr/local/bin/brew ]; then
                 arch -x86_64 /bin/bash -c \
                   "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
               fi
-              IBREW="arch -x86_64 /usr/local/bin/brew"
-              $IBREW install imagemagick dylibbundler
-              cp "$($IBREW --prefix imagemagick)/bin/magick" stage/bin/magick
-              mkdir -p stage/lib
-              arch -x86_64 /usr/local/bin/dylibbundler \
-                -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+              build_magick_from_source "arch -x86_64" "/usr/local/bin/brew" "/usr/local/bin/dylibbundler"
               # Fail loudly if Rosetta somehow produced an arm64 binary.
               file stage/bin/magick | grep -q 'x86_64' \
                 || { echo "ERROR: bundled magick is not x86_64"; file stage/bin/magick; exit 1; }
+              verify_magick
               ;;
           esac
 
