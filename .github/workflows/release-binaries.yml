@@ -170,6 +170,16 @@ jobs:
             export PKG_CONFIG_PATH="${PC#:}:$PREFIX/lib/pkgconfig"
 
             pushd im-src >/dev/null
+            # Delegates are pinned EXPLICITLY — every optional one is either --with or
+            # --without, nothing left to autodetection. This is the determinism fix:
+            # otherwise configure enables whatever delegate libraries happen to be
+            # pre-installed on the runner (or a dev's Mac), and a single one with a
+            # dangling/broken .pc (we hit `ld: library 'lqr-1' not found`) fails the
+            # whole link. The --with set is the app's needs (raster + text); the
+            # --without set is every other delegate configure knows about (from
+            # `./configure --help`). Verified locally: this yields a clean build whose
+            # DELEGATES are bzlib/fontconfig/freetype/heic/jng/jpeg/lcms/lzma/png/tiff/
+            # webp/xml/zlib/zstd, and the binary round-trips PNG + JPEG.
             # shellcheck disable=SC2086
             $RUN ./configure \
               --prefix="$INSTALL" \
@@ -180,7 +190,13 @@ jobs:
               --without-x \
               --without-magick-plus-plus \
               --with-png --with-jpeg --with-tiff --with-webp --with-heic \
-              --with-freetype --with-lcms2
+              --with-freetype --with-fontconfig --with-lcms \
+              --with-zlib --with-bzlib --with-lzma --with-zstd --with-xml \
+              --without-djvu --without-dmr --without-jbig --without-jxl --without-lqr \
+              --without-openexr --without-openjp2 --without-pango --without-raqm \
+              --without-raw --without-zip --without-autotrace --without-dps \
+              --without-fftw --without-flif --without-fpx --without-gslib \
+              --without-gvc --without-rsvg --without-wmf --without-uhdr
             # shellcheck disable=SC2086
             $RUN make -j"$(sysctl -n hw.ncpu)"
             # shellcheck disable=SC2086
@@ -204,7 +220,9 @@ jobs:
             # Clear canary: PNG must be registered read+write. If a delegate probe
             # silently failed at configure time this fails HERE with an obvious message,
             # rather than as a cryptic "no encode delegate for `XC'" from the round-trip.
-            if ! stage/bin/magick -list format | grep -Eiq 'PNG\*?[[:space:]]+PNG[[:space:]]+rw'; then
+            # Matches both the no-modules layout (`PNG* rw-`) and the module layout
+            # (`PNG* PNG  rw-`); the optional-`*` and optional module column cover both.
+            if ! stage/bin/magick -list format | grep -Eiq '^[[:space:]]*PNG\*?[[:space:]]+(PNG[[:space:]]+)?rw'; then
               echo "ERROR: PNG is not registered read/write in this build (delegate probe likely failed at configure)"
               stage/bin/magick -list format | grep -i png || true
               exit 1
