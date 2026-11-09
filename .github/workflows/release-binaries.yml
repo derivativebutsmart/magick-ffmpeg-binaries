@@ -270,6 +270,32 @@ jobs:
               ;;
           esac
 
+      - name: Verify HEIC decoding (iPhone photos)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The app refuses HEIC input up front when `magick -list format` shows no
+          # HEIC reader (format_preflight.rs), so a bundle without one tells users to
+          # convert their iPhone photos by hand. Fail the release here instead.
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          m="$GITHUB_WORKSPACE/stage/bin/magick"
+          [ -x "$m" ] || m="$m.exe"
+          fmt="$("$m" -list format | grep -Ei '^[[:space:]]*HEIC\*?[[:space:]]' || true)"
+          echo "$fmt"
+          if ! echo "$fmt" | grep -Eiq 'HEIC\*?[[:space:]]+(HEIC[[:space:]]+)?r'; then
+            echo "ERROR: this magick build cannot READ HEIC (no libheif/HEVC decoder)"
+            exit 1
+          fi
+          # Where an encoder exists too, prove the decoder actually works end to end
+          # (with ImageMagick env unset and from a scratch dir, like a user machine).
+          if echo "$fmt" | grep -Eiq 'HEIC\*?[[:space:]]+(HEIC[[:space:]]+)?rw'; then
+            t="$(mktemp -d)"
+            ( cd "$t" \
+              && env -u MAGICK_HOME -u MAGICK_CONFIGURE_PATH "$m" -size 64x64 gradient:red-blue heic:in.heic \
+              && env -u MAGICK_HOME -u MAGICK_CONFIGURE_PATH "$m" in.heic png:out.png )
+            echo "magick HEIC round-trip OK"
+          fi
+
       - name: Add license texts (FFmpeg is GPL)
         shell: bash
         run: |
