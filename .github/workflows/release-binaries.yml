@@ -60,7 +60,7 @@ jobs:
           - { slug: windows-x86_64, os: windows-latest, ext: zip }
           # x86_64 is built on the arm64 runner under Rosetta (Intel macOS runners
           # are scarce/being retired); see the magick step for how.
-          - { slug: macos-x86_64, os: macos-15, ext: tar.gz }
+          - { slug: macos-x86_64, os: macos-15-intel, ext: tar.gz }
           - { slug: macos-aarch64, os: macos-15, ext: tar.gz }
     runs-on: ${{ matrix.os }}
     steps:
@@ -213,6 +213,16 @@ jobs:
           # round-trips a PNG (the exact operation that failed) with ImageMagick env
           # unset and from a scratch dir — mirroring a clean user machine.
           verify_magick() {
+            # Diagnostics: show what got bundled and any @executable_path reference
+            # that points at a dylib missing from stage/lib (a dyld "Library not
+            # loaded" at run time), so a failure here is self-explanatory.
+            echo "--- stage/lib"; ls -l stage/lib
+            for f in stage/bin/magick stage/lib/*.dylib; do
+              otool -L "$f" | awk 'NR>1 && /@executable_path\/..\/lib\//{print $1}' \
+                | while read -r ref; do
+                    [ -e "stage/lib/${ref##*/}" ] || echo "MISSING: ${ref##*/} (needed by $f)"
+                  done
+            done
             if stage/bin/magick -version | grep -q 'Modules'; then
               echo "ERROR: magick is still a modules build; runtime coders would be missing"
               stage/bin/magick -version; exit 1
@@ -253,16 +263,11 @@ jobs:
               verify_magick
               ;;
             macos-x86_64)
-              # Built on the arm64 runner under Rosetta against a SECOND, Intel
-              # Homebrew prefix at /usr/local (the native arm64 brew at /opt/homebrew
-              # is left alone), so magick + its bundled dylibs are genuinely x86_64.
-              # Avoids the scarce/retiring Intel macOS runner pool.
-              softwareupdate --install-rosetta --agree-to-license || true
-              if [ ! -x /usr/local/bin/brew ]; then
-                arch -x86_64 /bin/bash -c \
-                  "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-              fi
-              build_magick_from_source "arch -x86_64" "/usr/local/bin/brew" "/usr/local/bin/dylibbundler"
+              # Built natively on GitHub's Intel runner (macos-15-intel), whose
+              # preinstalled Homebrew lives at /usr/local. The old approach (Intel brew
+              # under Rosetta on an arm64 runner) no longer works: Homebrew now refuses
+              # to install on Intel-under-Rosetta ("only supported on Apple Silicon").
+              build_magick_from_source "" "brew" "dylibbundler"
               # Fail loudly if Rosetta somehow produced an arm64 binary.
               file stage/bin/magick | grep -q 'x86_64' \
                 || { echo "ERROR: bundled magick is not x86_64"; file stage/bin/magick; exit 1; }
