@@ -207,6 +207,24 @@ jobs:
             cp "$INSTALL/bin/magick" stage/bin/magick
             # shellcheck disable=SC2086
             $RUN "$BUNDLER" -od -b -x stage/bin/magick -d stage/lib -p '@executable_path/../lib/'
+
+            # dylibbundler adds the @executable_path/../lib/ rpath to each file once
+            # per dependency edge, so a dylib reached by several parents (libde265, via
+            # libheif) ends up with DUPLICATE LC_RPATH entries. macOS 15's dyld refuses
+            # to load such a dylib ("duplicate LC_RPATH"), which broke HEIC and made
+            # magick die at launch. Drop the extras, then re-sign (arm64 requires a
+            # valid signature after install_name_tool edits).
+            local f rp n
+            for f in stage/bin/magick stage/lib/*.dylib; do
+              otool -l "$f" | awk '/cmd LC_RPATH/{r=1} r&&/ path /{print $2; r=0}' \
+                | sort | uniq -c | while read -r n rp; do
+                    while [ "$n" -gt 1 ]; do
+                      install_name_tool -delete_rpath "$rp" "$f"
+                      n=$((n - 1))
+                    done
+                  done
+              codesign --force --sign - "$f"
+            done
           }
 
           # Prove the result is genuinely self-contained: NOT a modules build, and it
