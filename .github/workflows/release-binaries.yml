@@ -35,9 +35,9 @@ env:
   # previous `latest`/`snapshot` pointers drifted on every run). Bump these to
   # re-pin; the published binaries-v1 release is the durable artifact users fetch,
   # so an upstream prune of an old build only breaks a *re-build*, not downloads.
-  BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-06-29-14-25"
-  BTBN_LINUX: "ffmpeg-N-125350-g3f6bf150cb-linux64-gpl.tar.xz"
-  BTBN_WIN: "ffmpeg-N-125350-g3f6bf150cb-win64-gpl.zip"
+  BTBN_BASE: "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-09-12-42"
+  BTBN_LINUX: "ffmpeg-N-128718-gb2b543c079-linux64-gpl.tar.xz"
+  BTBN_WIN: "ffmpeg-N-128718-gb2b543c079-win64-gpl.zip"
   # Martin-Riedl pins are per-arch (each arch has its own build id).
   MR_MACOS_ARM64: "https://ffmpeg.martin-riedl.de/download/macos/arm64/1781693612_N-125070-gd69e8d0a95"
   MR_MACOS_AMD64: "https://ffmpeg.martin-riedl.de/download/macos/amd64/1767299902_N-122320-g38e89fe502"
@@ -60,8 +60,8 @@ jobs:
           - { slug: windows-x86_64, os: windows-latest, ext: zip }
           # x86_64 is built on the arm64 runner under Rosetta (Intel macOS runners
           # are scarce/being retired); see the magick step for how.
-          - { slug: macos-x86_64, os: macos-14, ext: tar.gz }
-          - { slug: macos-aarch64, os: macos-14, ext: tar.gz }
+          - { slug: macos-x86_64, os: macos-15, ext: tar.gz }
+          - { slug: macos-aarch64, os: macos-15, ext: tar.gz }
     runs-on: ${{ matrix.os }}
     steps:
       - name: Assemble FFmpeg + ffprobe
